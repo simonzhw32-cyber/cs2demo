@@ -4,6 +4,7 @@
 .tools/
 .tmp_*/
 *.exe
+*.exe~
 *.dem
 *.db
 *.db-shm

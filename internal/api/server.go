@@ -18,12 +18,13 @@ import (
 )
 
 type Server struct {
-	Store          *storage.Store
-	Orch           *orchestrator.Orchestrator
-	Parser         *parser.Parser
-	KB             prokb.KB
-	MaxUploadBytes int64
-	WebDir         string
+	Store            *storage.Store
+	Orch             *orchestrator.Orchestrator
+	Parser           *parser.Parser
+	KB               prokb.KB
+	AnalyzerProvider string
+	MaxUploadBytes   int64
+	WebDir           string
 }
 
 func (s *Server) Router() *gin.Engine {
@@ -37,7 +38,13 @@ func (s *Server) Router() *gin.Engine {
 		c.Next()
 	})
 
-	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	r.GET("/healthz", func(c *gin.Context) {
+		provider := s.AnalyzerProvider
+		if provider == "" {
+			provider = "unknown"
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "analyzer_provider": provider})
+	})
 
 	r.POST("/demos/inspect", s.handleInspectUpload)
 	r.POST("/demos", s.handleUpload)
@@ -63,27 +70,40 @@ func (s *Server) handleUpload(c *gin.Context) {
 	}
 
 	id := uuid.NewString()
-	filename := ""
-	path := ""
+	uploads := []storage.UploadEntry{}
 	uploadID := strings.TrimSpace(c.PostForm("upload_id"))
-	if uploadID != "" {
-		if _, err := uuid.Parse(uploadID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid upload_id"})
-			return
-		}
-		var err error
-		path, err = s.Store.UploadPath(uploadID)
-		if errors.Is(err, storage.ErrNotFound) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "upload_id not found; choose the demo file again"})
-			return
-		}
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "load upload: " + err.Error()})
-			return
-		}
-		filename = c.PostForm("filename")
-		if filename == "" {
-			filename = uploadID + ".dem"
+	uploadIDs := c.PostFormArray("upload_ids")
+	if uploadID != "" && len(uploadIDs) == 0 {
+		uploadIDs = []string{uploadID}
+	}
+	if len(uploadIDs) > 0 {
+		filenames := c.PostFormArray("filenames")
+		for i, uploadID := range uploadIDs {
+			uploadID = strings.TrimSpace(uploadID)
+			if _, err := uuid.Parse(uploadID); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid upload_id"})
+				return
+			}
+			path, err := s.Store.UploadPath(uploadID)
+			if errors.Is(err, storage.ErrNotFound) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "upload_id not found; choose the demo file again"})
+				return
+			}
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "load upload: " + err.Error()})
+				return
+			}
+			filename := ""
+			if i < len(filenames) {
+				filename = strings.TrimSpace(filenames[i])
+			}
+			if filename == "" {
+				filename = c.PostForm("filename")
+			}
+			if filename == "" {
+				filename = uploadID + ".dem"
+			}
+			uploads = append(uploads, storage.UploadEntry{UploadID: uploadID, Filename: filename, Path: path})
 		}
 	} else {
 		file, err := c.FormFile("file")
@@ -97,32 +117,56 @@ func (s *Server) handleUpload(c *gin.Context) {
 			return
 		}
 		defer src.Close()
-		path, err = s.Store.SaveUpload(id, file.Filename, src)
+		nextUploadID := 0
+		entries, err := s.Store.SaveUploadEntries(func() string {
+			nextUploadID++
+			if nextUploadID == 1 {
+				return id
+			}
+			return uuid.NewString()
+		}, file.Filename, src)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "save upload: " + err.Error()})
 			return
 		}
-		filename = file.Filename
+		for _, entry := range entries {
+			if entry.Path != "" {
+				uploads = append(uploads, entry)
+			}
+		}
 	}
-
-	demo := domain.Demo{
-		ID:         id,
-		Filename:   filename,
-		FilePath:   path,
-		TargetUser: target,
-		Status:     domain.StatusQueued,
-	}
-	if err := s.Store.CreateDemo(c.Request.Context(), demo); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "create demo: " + err.Error()})
+	if len(uploads) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "archive contains no usable .dem files"})
 		return
 	}
 
-	s.Orch.Enqueue(orchestrator.Job{DemoID: id, FilePath: path, TargetUser: target})
+	demoIDs := make([]string, 0, len(uploads))
+	for i, up := range uploads {
+		demoID := id
+		if i > 0 || len(uploads) > 1 {
+			demoID = uuid.NewString()
+		}
+		demo := domain.Demo{
+			ID:         demoID,
+			Filename:   up.Filename,
+			FilePath:   up.Path,
+			TargetUser: target,
+			Status:     domain.StatusQueued,
+		}
+		if err := s.Store.CreateDemo(c.Request.Context(), demo); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "create demo: " + err.Error()})
+			return
+		}
+
+		s.Orch.Enqueue(orchestrator.Job{DemoID: demoID, FilePath: up.Path, TargetUser: target})
+		demoIDs = append(demoIDs, demoID)
+	}
 
 	c.JSON(http.StatusAccepted, gin.H{
-		"demo_id":  id,
+		"demo_id":  demoIDs[0],
+		"demo_ids": demoIDs,
 		"status":   domain.StatusQueued,
-		"poll_url": "/demos/" + id,
+		"poll_url": "/demos/" + demoIDs[0],
 	})
 }
 
@@ -143,21 +187,49 @@ func (s *Server) handleInspectUpload(c *gin.Context) {
 	}
 	defer src.Close()
 
-	uploadID := uuid.NewString()
-	path, err := s.Store.SaveUpload(uploadID, file.Filename, src)
+	entries, err := s.Store.SaveUploadEntries(uuid.NewString, file.Filename, src)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save upload: " + err.Error()})
 		return
 	}
-	players, err := s.Parser.ListPlayers(path)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "inspect demo: " + err.Error()})
-		return
+	type inspectedEntry struct {
+		UploadID string   `json:"upload_id"`
+		Filename string   `json:"filename"`
+		Players  []string `json:"players"`
+		Error    string   `json:"error,omitempty"`
+	}
+	out := make([]inspectedEntry, 0, len(entries))
+	seenPlayers := map[string]bool{}
+	players := []string{}
+	first := storage.UploadEntry{}
+	for _, entry := range entries {
+		ie := inspectedEntry{UploadID: entry.UploadID, Filename: entry.Filename, Error: entry.Error}
+		if entry.Path != "" && entry.Error == "" {
+			if first.Path == "" {
+				first = entry
+			}
+			entryPlayers, err := s.Parser.ListPlayers(entry.Path)
+			ie.Players = entryPlayers
+			if err != nil {
+				ie.Error = err.Error()
+			}
+		}
+		out = append(out, ie)
+		for _, p := range ie.Players {
+			if !seenPlayers[p] {
+				seenPlayers[p] = true
+				players = append(players, p)
+			}
+		}
+	}
+	if first.Path == "" && len(entries) > 0 {
+		first = entries[0]
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"upload_id": uploadID,
-		"filename":  file.Filename,
+		"upload_id": first.UploadID,
+		"filename":  first.Filename,
 		"players":   players,
+		"entries":   out,
 	})
 }
 

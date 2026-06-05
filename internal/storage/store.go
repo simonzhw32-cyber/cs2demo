@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bufio"
+	"bytes"
 	"compress/flate"
 	"context"
 	"database/sql"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,6 +27,13 @@ var ErrNotFound = errors.New("not found")
 type Store struct {
 	db      *sql.DB
 	dataDir string
+}
+
+type UploadEntry struct {
+	UploadID string `json:"upload_id"`
+	Filename string `json:"filename"`
+	Error    string `json:"error,omitempty"`
+	Path     string `json:"-"`
 }
 
 func Open(sqlitePath, dataDir string) (*Store, error) {
@@ -95,6 +104,71 @@ func (s *Store) SaveUpload(id, filename string, src io.Reader) (string, error) {
 	return path, nil
 }
 
+func (s *Store) SaveUploadEntries(newID func() string, filename string, src io.Reader) ([]UploadEntry, error) {
+	br := bufio.NewReader(src)
+	kind := detectArchiveKind(filename, br)
+	if kind == archivePlain {
+		id := newID()
+		path, err := s.SaveUpload(id, filename, br)
+		if err != nil {
+			return nil, err
+		}
+		return []UploadEntry{{UploadID: id, Filename: filename, Path: path}}, nil
+	}
+
+	dir := filepath.Join(s.dataDir, "demos")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	var entries []UploadEntry
+	created := []string{}
+	ok := false
+	defer func() {
+		if ok {
+			return
+		}
+		for _, path := range created {
+			_ = os.Remove(path)
+		}
+	}()
+	saveEntry := func(name string, writeTo func(io.Writer) error) error {
+		id := newID()
+		path := filepath.Join(dir, id+".dem")
+		f, err := os.Create(path)
+		if err != nil {
+			return err
+		}
+		if err := writeTo(f); err != nil {
+			_ = f.Close()
+			_ = os.Remove(path)
+			return err
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(path)
+			return err
+		}
+		created = append(created, path)
+		entries = append(entries, UploadEntry{UploadID: id, Filename: name, Path: path})
+		return nil
+	}
+	var err error
+	switch kind {
+	case archiveZip:
+		err = copyDemoEntriesFromZip(br, saveEntry)
+	case archiveRar:
+		err = s.withTempArchive(filename, br, func(path string) error {
+			return copyDemoEntriesFromRar(path, saveEntry, func(name string, err error) {
+				entries = append(entries, UploadEntry{Filename: rarEntryDisplayName(name), Error: err.Error()})
+			})
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	ok = true
+	return entries, nil
+}
+
 func (s *Store) UploadPath(id string) (string, error) {
 	path := filepath.Join(s.dataDir, "demos", id+".dem")
 	if _, err := os.Stat(path); err != nil {
@@ -108,22 +182,237 @@ func (s *Store) UploadPath(id string) (string, error) {
 
 func saveDemoContent(filename string, src io.Reader, dst io.Writer) error {
 	br := bufio.NewReader(src)
-	isZip := strings.EqualFold(filepath.Ext(filename), ".zip")
-	if sig, err := br.Peek(4); err == nil && len(sig) == 4 {
-		isZip = isZip || string(sig) == "PK\x03\x04"
-	}
-	if isZip {
+	switch detectArchiveKind(filename, br) {
+	case archiveZip:
 		return copyFirstDemoFromZip(br, dst)
+	case archiveRar:
+		tmpDir := os.TempDir()
+		tmp, err := os.CreateTemp(tmpDir, "cs2demo-*.rar")
+		if err != nil {
+			return err
+		}
+		tmpPath := tmp.Name()
+		ok := false
+		defer func() {
+			_ = tmp.Close()
+			if !ok {
+				_ = os.Remove(tmpPath)
+			}
+		}()
+		if _, err := io.Copy(tmp, br); err != nil {
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := copyFirstDemoFromRar(tmpPath, dst); err != nil {
+			return err
+		}
+		ok = true
+		_ = os.Remove(tmpPath)
+		return nil
 	}
 	_, err := io.Copy(dst, br)
 	return err
 }
 
+type archiveKind int
+
+const (
+	archivePlain archiveKind = iota
+	archiveZip
+	archiveRar
+)
+
+func detectArchiveKind(filename string, br *bufio.Reader) archiveKind {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == ".zip" {
+		return archiveZip
+	}
+	if ext == ".rar" {
+		return archiveRar
+	}
+	if sig, err := br.Peek(8); err == nil {
+		if len(sig) >= 4 && string(sig[:4]) == "PK\x03\x04" {
+			return archiveZip
+		}
+		if isRarSignature(sig) {
+			return archiveRar
+		}
+	}
+	return archivePlain
+}
+
+func isRarSignature(sig []byte) bool {
+	return len(sig) >= 7 &&
+		sig[0] == 'R' && sig[1] == 'a' && sig[2] == 'r' && sig[3] == '!' &&
+		sig[4] == 0x1a && sig[5] == 0x07 &&
+		(sig[6] == 0x00 || (len(sig) >= 8 && sig[6] == 0x01 && sig[7] == 0x00))
+}
+
+func (s *Store) withTempArchive(filename string, src io.Reader, fn func(path string) error) error {
+	dir := filepath.Join(s.dataDir, "tmp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		ext = ".archive"
+	}
+	f, err := os.CreateTemp(dir, "upload-*"+ext)
+	if err != nil {
+		return err
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := io.Copy(f, src); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return fn(path)
+}
+
+func copyFirstDemoFromRar(path string, dst io.Writer) error {
+	errStop := errors.New("stop after first rar demo")
+	err := copyDemoEntriesFromRar(path, func(name string, writeTo func(io.Writer) error) error {
+		if err := writeTo(dst); err != nil {
+			return err
+		}
+		return errStop
+	}, nil)
+	if errors.Is(err, errStop) {
+		return nil
+	}
+	return err
+}
+
+func copyDemoEntriesFromRar(path string, onDemo func(name string, writeTo func(io.Writer) error) error, onError func(name string, err error)) error {
+	entries, err := listRarDemoEntries(path)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return errors.New("rar does not contain a .dem file")
+	}
+	var extractErrors []string
+	extracted := 0
+	for _, entry := range entries {
+		extractDir, err := os.MkdirTemp(filepath.Dir(path), "rar-extract-*")
+		if err != nil {
+			return err
+		}
+		if err := extractRarEntriesToDir(path, []string{entry}, extractDir); err != nil {
+			_ = os.RemoveAll(extractDir)
+			extractErrors = append(extractErrors, fmt.Sprintf("%s: %v", entry, err))
+			if onError != nil {
+				onError(entry, err)
+			}
+			continue
+		}
+		name := rarEntryDisplayName(entry)
+		if err := onDemo(name, func(dst io.Writer) error {
+			extracted, err := extractedEntryPath(extractDir, entry)
+			if err != nil {
+				return err
+			}
+			f, err := os.Open(extracted)
+			if err != nil {
+				return fmt.Errorf("open extracted %s: %w", entry, err)
+			}
+			defer f.Close()
+			_, err = io.Copy(dst, f)
+			return err
+		}); err != nil {
+			_ = os.RemoveAll(extractDir)
+			return err
+		}
+		_ = os.RemoveAll(extractDir)
+		extracted++
+	}
+	if extracted == 0 && len(extractErrors) > 0 && onError == nil {
+		return fmt.Errorf("extract rar demos: %s", strings.Join(extractErrors, "; "))
+	}
+	return nil
+}
+
+func rarEntryDisplayName(entry string) string {
+	name := filepath.Base(filepath.FromSlash(entry))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		return entry
+	}
+	return name
+}
+
+func listRarDemoEntries(path string) ([]string, error) {
+	cmd := exec.Command("tar", "-tf", path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list rar with tar.exe: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	lines := strings.Split(string(out), "\n")
+	entries := []string{}
+	for _, line := range lines {
+		name := strings.TrimSpace(line)
+		if strings.EqualFold(filepath.Ext(name), ".dem") {
+			entries = append(entries, name)
+		}
+	}
+	return entries, nil
+}
+
+func extractRarEntriesToDir(path string, entries []string, dir string) error {
+	args := []string{"-xf", path, "-C", dir}
+	args = append(args, entries...)
+	cmd := exec.Command("tar", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("extract rar with tar.exe: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+func extractedEntryPath(root, entry string) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(entry))
+	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+		return "", fmt.Errorf("unsafe rar entry path: %s", entry)
+	}
+	path := filepath.Join(root, clean)
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe rar entry path: %s", entry)
+	}
+	return path, nil
+}
+
 func copyFirstDemoFromZip(src io.Reader, dst io.Writer) error {
+	errStop := errors.New("stop after first demo")
+	err := copyDemoEntriesFromZip(src, func(name string, writeTo func(io.Writer) error) error {
+		if err := writeTo(dst); err != nil {
+			return err
+		}
+		return errStop
+	})
+	if errors.Is(err, errStop) {
+		return nil
+	}
+	return err
+}
+
+func copyDemoEntriesFromZip(src io.Reader, onDemo func(name string, writeTo func(io.Writer) error) error) error {
+	found := false
 	for {
 		header := make([]byte, 30)
 		if _, err := io.ReadFull(src, header); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				if found {
+					return nil
+				}
 				return errors.New("zip does not contain a .dem file")
 			}
 			return err
@@ -132,6 +421,9 @@ func copyFirstDemoFromZip(src io.Reader, dst io.Writer) error {
 		switch sig {
 		case 0x04034b50:
 		case 0x02014b50, 0x06054b50:
+			if found {
+				return nil
+			}
 			return errors.New("zip does not contain a .dem file")
 		default:
 			return fmt.Errorf("invalid zip local header: 0x%08x", sig)
@@ -163,23 +455,44 @@ func copyFirstDemoFromZip(src io.Reader, dst io.Writer) error {
 
 		limited := io.LimitReader(src, int64(compressedSize))
 		if isDemo {
+			found = true
 			switch method {
 			case 0:
-				_, err := io.Copy(dst, limited)
-				return err
+				if err := onDemo(name, func(dst io.Writer) error {
+					_, err := io.Copy(dst, limited)
+					return err
+				}); err != nil {
+					return err
+				}
 			case 8:
-				fr := flate.NewReader(limited)
-				defer fr.Close()
-				n, err := io.Copy(dst, fr)
-				if err != nil && errors.Is(err, io.ErrUnexpectedEOF) && uncompressedSize > 0 {
-					if padErr := padMissingZipTail(dst, n, int64(uncompressedSize)); padErr == nil {
+				if err := onDemo(name, func(dst io.Writer) error {
+					fr := flate.NewReader(limited)
+					n, err := io.Copy(dst, fr)
+					closeErr := fr.Close()
+					recovered := false
+					if err != nil && errors.Is(err, io.ErrUnexpectedEOF) && uncompressedSize > 0 {
+						if padErr := padMissingZipTail(dst, n, int64(uncompressedSize)); padErr == nil {
+							err = nil
+							recovered = true
+						}
+					}
+					if err != nil {
+						return err
+					}
+					if recovered && errors.Is(closeErr, io.ErrUnexpectedEOF) {
 						return nil
 					}
+					return closeErr
+				}); err != nil {
+					return err
 				}
-				return err
 			default:
 				return fmt.Errorf("unsupported zip compression method %d for %s", method, name)
 			}
+			if _, err := io.Copy(io.Discard, limited); err != nil {
+				return err
+			}
+			continue
 		}
 		if _, err := io.Copy(io.Discard, limited); err != nil {
 			return err

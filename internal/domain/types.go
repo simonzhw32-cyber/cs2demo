@@ -286,21 +286,23 @@ type ProBaseline struct {
 }
 
 type AnalysisReport struct {
-	DemoID        string             `json:"demo_id"`
-	GeneratedAt   time.Time          `json:"generated_at"`
-	OverallScore  int                `json:"overall_score"`
-	Verdict       string             `json:"verdict"`
-	Strengths     []ReportPoint      `json:"strengths"`
-	Weaknesses    []ReportPoint      `json:"weaknesses"`
-	Suggestions   []ReportPoint      `json:"suggestions"`
-	Comparison    []MetricCompare    `json:"comparison"`
-	RoundAnalyses []RoundAnalysisOut `json:"round_analyses,omitempty"`
-	ProReference  string             `json:"pro_reference,omitempty"`
-	TeamSyncEval  string             `json:"team_sync_eval,omitempty"`
-	SmokeEval     string             `json:"smoke_eval,omitempty"`
-	MovementEval  string             `json:"movement_eval,omitempty"`
-	PressureEval  string             `json:"pressure_eval,omitempty"`
-	AimEval       string             `json:"aim_eval,omitempty"`
+	DemoID          string             `json:"demo_id"`
+	GeneratedAt     time.Time          `json:"generated_at"`
+	AnalysisSource  string             `json:"analysis_source,omitempty"`
+	AnalysisWarning string             `json:"analysis_warning,omitempty"`
+	OverallScore    int                `json:"overall_score"`
+	Verdict         string             `json:"verdict"`
+	Strengths       []ReportPoint      `json:"strengths"`
+	Weaknesses      []ReportPoint      `json:"weaknesses"`
+	Suggestions     []ReportPoint      `json:"suggestions"`
+	Comparison      []MetricCompare    `json:"comparison"`
+	RoundAnalyses   []RoundAnalysisOut `json:"round_analyses,omitempty"`
+	ProReference    string             `json:"pro_reference,omitempty"`
+	TeamSyncEval    string             `json:"team_sync_eval,omitempty"`
+	SmokeEval       string             `json:"smoke_eval,omitempty"`
+	MovementEval    string             `json:"movement_eval,omitempty"`
+	PressureEval    string             `json:"pressure_eval,omitempty"`
+	AimEval         string             `json:"aim_eval,omitempty"`
 }
 
 type PlayerTrend struct {

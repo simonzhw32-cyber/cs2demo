@@ -1,7 +1,6 @@
 package analyzer
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -65,7 +64,7 @@ func NewAnthropicClient(apiKey, baseURL, model string) *AnthropicClient {
 		baseURL = "https://api.anthropic.com"
 	}
 	if model == "" {
-		model = "claude-opus-4-7"
+		model = "claude-sonnet-4-20250514"
 	}
 	return &AnthropicClient{
 		apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/"), model: model,
@@ -86,6 +85,11 @@ func (a *AnthropicClient) Complete(ctx context.Context, system, user string) (st
 			return out, nil
 		}
 		lastErr = err
+		var truncated *TruncatedError
+		if errors.As(err, &truncated) && out != "" {
+			log.Printf("[llm anthropic] output truncated, attempting to repair %d bytes", len(out))
+			return out, nil
+		}
 		if !isRetryable(err) {
 			log.Printf("[llm anthropic] non-retryable err: %v", err)
 			return "", err
@@ -112,13 +116,14 @@ func (a *AnthropicClient) callOnce(ctx context.Context, system, user string) (st
 		},
 	}
 	buf, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL+"/v1/messages", bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, "POST", anthropicMessagesEndpoint(a.baseURL), bytes.NewReader(buf))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("x-api-key", a.apiKey)
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := a.hc.Do(req)
@@ -131,12 +136,24 @@ func (a *AnthropicClient) callOnce(ctx context.Context, system, user string) (st
 		return "", fmt.Errorf("anthropic %d: %s", resp.StatusCode, truncate(string(raw), 400))
 	}
 
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return parseAnthropicResponse(raw)
+}
+
+func parseAnthropicResponse(raw []byte) (string, error) {
+	if bytes.Contains(raw, []byte("data:")) {
+		return parseAnthropicStream(string(raw))
+	}
+	return parseAnthropicJSON(raw)
+}
+
+func parseAnthropicStream(raw string) (string, error) {
 	var sb strings.Builder
 	stopReason := ""
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range strings.Split(raw, "\n") {
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
@@ -166,9 +183,6 @@ func (a *AnthropicClient) callOnce(ctx context.Context, system, user string) (st
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("stream read: %w", err)
-	}
 	out := sb.String()
 	if stopReason == "max_tokens" {
 		return out, &TruncatedError{Got: len(out), StopReason: stopReason}
@@ -177,6 +191,41 @@ func (a *AnthropicClient) callOnce(ctx context.Context, system, user string) (st
 		return "", fmt.Errorf("empty stream output")
 	}
 	return out, nil
+}
+
+func parseAnthropicJSON(raw []byte) (string, error) {
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", fmt.Errorf("decode anthropic json: %w", err)
+	}
+	var sb strings.Builder
+	for _, block := range parsed.Content {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
+		}
+	}
+	out := sb.String()
+	if parsed.StopReason == "max_tokens" {
+		return out, &TruncatedError{Got: len(out), StopReason: parsed.StopReason}
+	}
+	if out == "" {
+		return "", fmt.Errorf("empty json output")
+	}
+	return out, nil
+}
+
+func anthropicMessagesEndpoint(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + "/messages"
+	}
+	return baseURL + "/v1/messages"
 }
 
 type TruncatedError struct {
@@ -212,8 +261,8 @@ func (o *OpenAIClient) Name() string { return "openai:" + o.model }
 
 func (o *OpenAIClient) Complete(ctx context.Context, system, user string) (string, error) {
 	body := map[string]any{
-		"model":       o.model,
-		"temperature": 0.4,
+		"model":           o.model,
+		"temperature":     0.4,
 		"response_format": map[string]string{"type": "json_object"},
 		"messages": []map[string]any{
 			{"role": "system", "content": system},
@@ -260,7 +309,7 @@ func BuildLLMClient(provider, apiKey, baseURL, model string) LLMClient {
 	switch strings.ToLower(provider) {
 	case "openai":
 		return NewOpenAIClient(apiKey, baseURL, model)
-	case "anthropic", "":
+	case "anthropic":
 		return NewAnthropicClient(apiKey, baseURL, model)
 	}
 	return nil

@@ -13,6 +13,7 @@ import (
 	events "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/msg"
 
+	"github.com/cs2demo/platform/internal/callouts"
 	"github.com/cs2demo/platform/internal/domain"
 )
 
@@ -186,7 +187,7 @@ func (s *parseState) markKAST(roundIdx int, id uint64) {
 }
 
 func (s *parseState) zoneAt(p demoinfocs.Parser, x, y float64) string {
-	return mapZone(s.mapName, x, y)
+	return callouts.Normalize(s.mapName, mapZone(s.mapName, x, y))
 }
 
 func registerHandlers(p demoinfocs.Parser, s *parseState) {

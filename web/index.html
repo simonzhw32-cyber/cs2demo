@@ -12,6 +12,7 @@
     --fg: #e6edf3;
     --muted: #8b949e;
     --accent: #f78166;
+    --info: #58a6ff;
     --good: #3fb950;
     --bad: #f85149;
     --warn: #d29922;
@@ -123,7 +124,18 @@
   }
   .meta-grid .item .k { color: var(--muted); font-size: 12px; }
   .meta-grid .item .v { font-size: 18px; font-weight: 600; margin-top: 4px; }
-  .verdict { font-size: 15px; padding: 12px 14px; background: var(--bg); border-left: 3px solid var(--accent); border-radius: 4px; margin-bottom: 16px; }
+  .verdict { font-size: 15px; padding: 12px 14px; background: var(--bg); border-left: 3px solid var(--info); border-radius: 4px; margin-bottom: 16px; }
+  .analysis-warning {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(248,81,73,0.45);
+    border-left: 3px solid var(--bad);
+    border-radius: 4px;
+    background: rgba(248,81,73,0.08);
+    color: var(--bad);
+    font-size: 13px;
+    line-height: 1.45;
+  }
   .score { font-size: 36px; font-weight: 700; color: var(--accent); }
   .score small { color: var(--muted); font-size: 14px; font-weight: 400; margin-left: 4px; }
   .points { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -168,6 +180,57 @@
     font-size: 12px; cursor: pointer; color: var(--accent);
   }
   .chip:hover { background: var(--accent); color: #1a1a1a; }
+  .entry-picker {
+    margin-top: 14px;
+    padding: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .entry-picker .entry-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .entry-picker .entry-actions button {
+    padding: 3px 8px;
+    margin-left: 6px;
+    background: var(--border);
+    color: var(--fg);
+    font-size: 12px;
+  }
+  .entry-list {
+    display: grid;
+    gap: 6px;
+  }
+  .entry-item {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    font-size: 13px;
+  }
+  .entry-item .entry-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .entry-item .entry-meta {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .entry-item.invalid {
+    opacity: .62;
+  }
+  .entry-item.invalid .entry-meta {
+    color: var(--bad);
+  }
   .timeline {
     display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px;
   }
@@ -221,7 +284,7 @@
 <body>
 <header>
   <h1>CS2 Demo AI 复盘</h1>
-  <span class="tag">▎ 上传 .dem · 解析 · 对比职业基线 · 拿结果闭环</span>
+  <span class="tag">▎ 上传 .dem/.zip/.rar · 解析 · 对比职业基线 · 拿结果闭环</span>
 </header>
 
 <main>
@@ -230,8 +293,8 @@
     <form id="upload-form">
       <div class="row">
         <div>
-          <label for="file">.dem 或 .zip 文件（最大 1GB）</label>
-          <input id="file" type="file" name="file" accept=".dem,.zip,application/zip" required />
+          <label for="file">.dem、.zip 或 .rar 文件（最大 1GB）</label>
+          <input id="file" type="file" name="file" accept=".dem,.zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" required />
         </div>
         <div>
           <label for="player-select">目标玩家（选择文件后自动识别）</label>
@@ -243,6 +306,16 @@
         <button type="submit" id="submit-btn">开跑</button>
       </div>
       <div class="status-line" id="upload-status"></div>
+      <div class="entry-picker hidden" id="entry-picker">
+        <div class="entry-toolbar">
+          <span id="entry-summary">选择要分析的 demo</span>
+          <span class="entry-actions">
+            <button type="button" id="entry-first">只选第一个</button>
+            <button type="button" id="entry-all">全选</button>
+          </span>
+        </div>
+        <div class="entry-list" id="entry-list"></div>
+      </div>
       <div class="progress-wrap hidden" id="progress-wrap">
         <div class="progress-steps">
           <div class="step" data-step="queued">① 排队</div>
@@ -267,6 +340,7 @@
   <div class="card hidden" id="report-card">
     <h2>③ AI 复盘报告</h2>
     <div class="meta-grid" id="match-meta"></div>
+    <div class="analysis-warning hidden" id="analysis-warning"></div>
     <div class="verdict" id="verdict"></div>
     <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px;">
       <div class="score" id="score">--</div><div><small>综合评分 / 100</small></div>
@@ -342,6 +416,11 @@ const playerInput = $("player");
 const playerSelect = $("player-select");
 const submitBtn = $("submit-btn");
 const statusLine = $("upload-status");
+const entryPicker = $("entry-picker");
+const entryList = $("entry-list");
+const entrySummary = $("entry-summary");
+const entryFirstBtn = $("entry-first");
+const entryAllBtn = $("entry-all");
 const progressWrap = $("progress-wrap");
 const progressFill = $("progress-fill");
 const progressStage = $("progress-stage");
@@ -352,9 +431,10 @@ let pollTimer = null;
 let elapsedTimer = null;
 let progressStart = 0;
 let inspectedUpload = null;
+let pollTimers = new Map();
 
 const STAGE_PROGRESS = {
-  uploading: { from: 0, to: 15, label: "正在上传 .dem/.zip" },
+  uploading: { from: 0, to: 15, label: "正在上传 .dem/.zip/.rar" },
   queued:    { from: 15, to: 25, label: "已入队，等待 worker" },
   parsing:   { from: 25, to: 60, label: "解析 demo（提取击杀、回合、经济）" },
   analyzing: { from: 60, to: 95, label: "AI 分析中（对比职业基线 + LLM 点评）" },
@@ -415,7 +495,7 @@ function uploadWithProgress(formData) {
         const pct = (e.loaded / e.total) * STAGE_PROGRESS.uploading.to;
         progressFill.classList.remove("indeterminate");
         progressFill.style.width = pct.toFixed(1) + "%";
-        progressStage.textContent = `正在上传 .dem/.zip（${(e.loaded/1048576).toFixed(1)}/${(e.total/1048576).toFixed(1)} MB）`;
+        progressStage.textContent = `正在上传 .dem/.zip/.rar（${(e.loaded/1048576).toFixed(1)}/${(e.total/1048576).toFixed(1)} MB）`;
       }
     };
     xhr.onload = () => {
@@ -432,6 +512,7 @@ function uploadWithProgress(formData) {
 async function inspectSelectedDemo() {
   const file = fileInput.files && fileInput.files[0];
   inspectedUpload = null;
+  hideEntryPicker();
   playerSelect.disabled = true;
   playerSelect.innerHTML = `<option value="">正在解析玩家列表…</option>`;
   playerInput.value = "";
@@ -441,7 +522,7 @@ async function inspectSelectedDemo() {
   }
 
   submitBtn.disabled = true;
-  statusLine.textContent = "正在上传并预解析 demo 玩家列表，较大的 5E zip 可能需要几十秒…";
+  statusLine.textContent = "正在上传并预解析 demo 玩家列表，较大的 5E zip 或 HLTV rar 可能需要几十秒…";
   const fd = new FormData();
   fd.append("file", file);
   try {
@@ -449,7 +530,8 @@ async function inspectSelectedDemo() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || ("HTTP " + resp.status));
     inspectedUpload = data;
-    const players = data.players || [];
+    renderEntryPicker(data.entries || []);
+    const players = currentSelectablePlayers();
     playerSelect.innerHTML = players.length
       ? `<option value="">请选择要分析的玩家</option>` + players.map(name => `<option value="${escapeHTML(name)}">${escapeHTML(name)}</option>`).join("")
       : `<option value="">未识别到玩家，可手动输入</option>`;
@@ -469,19 +551,45 @@ fileInput.addEventListener("change", inspectSelectedDemo);
 playerSelect.addEventListener("change", () => {
   playerInput.value = playerSelect.value;
 });
+entryFirstBtn.addEventListener("click", () => selectEntries("first"));
+entryAllBtn.addEventListener("click", () => selectEntries("all"));
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (playerSelect.value) playerInput.value = playerSelect.value;
   const fd = new FormData();
-  if (inspectedUpload && inspectedUpload.upload_id) {
+  const selectedEntries = getSelectedEntries();
+  const hasEntryChoices = inspectedUpload && Array.isArray(inspectedUpload.entries) && inspectedUpload.entries.length > 1;
+  if (hasEntryChoices && selectedEntries.length === 0) {
+    statusLine.textContent = "请至少选择一个要分析的 demo。";
+    return;
+  }
+  const targetPlayer = (playerInput.value || playerSelect.value || "").trim();
+  if (!targetPlayer) {
+    statusLine.textContent = "请选择或输入目标玩家。";
+    return;
+  }
+  const missingTarget = selectedEntries.filter(entry =>
+    !((entry.players || []).some(name => String(name).toLowerCase() === targetPlayer.toLowerCase()))
+  );
+  if (missingTarget.length > 0) {
+    statusLine.textContent = `选中的 ${missingTarget.length} 个 demo 不包含玩家「${targetPlayer}」，请重新选择场次或玩家。`;
+    return;
+  }
+  if (selectedEntries.length > 0) {
+    for (const entry of selectedEntries) {
+      fd.append("upload_ids", entry.upload_id);
+      fd.append("filenames", entry.filename || "");
+    }
+    fd.append("player", targetPlayer);
+  } else if (inspectedUpload && inspectedUpload.upload_id) {
     fd.append("upload_id", inspectedUpload.upload_id);
     fd.append("filename", inspectedUpload.filename || "");
-    fd.append("player", playerInput.value);
+    fd.append("player", targetPlayer);
   } else {
     const file = fileInput.files && fileInput.files[0];
     if (file) fd.append("file", file);
-    fd.append("player", playerInput.value);
+    fd.append("player", targetPlayer);
   }
   submitBtn.disabled = true;
   statusLine.textContent = "";
@@ -490,10 +598,14 @@ form.addEventListener("submit", async (e) => {
   progressStage.textContent = STAGE_PROGRESS.uploading.label;
   try {
     const data = await uploadWithProgress(fd);
-    statusLine.textContent = `已入队 demo_id=${data.demo_id.slice(0,8)}…`;
+    const ids = data.demo_ids || (data.demo_id ? [data.demo_id] : []);
+    statusLine.textContent = ids.length > 1
+      ? `已入队 ${ids.length} 个 demo，完成一个就会出现在历史列表。`
+      : `已入队 demo_id=${ids[0].slice(0,8)}…`;
     setStage("queued");
     refreshList();
-    startPolling(data.demo_id);
+    if (ids.length > 1) startPollingMany(ids);
+    else startPolling(ids[0]);
   } catch (err) {
     statusLine.textContent = "上传失败: " + err.message;
     setStage("failed");
@@ -502,12 +614,94 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
+function renderEntryPicker(entries) {
+  if (!entries || entries.length <= 1) {
+    hideEntryPicker();
+    return;
+  }
+  entryPicker.classList.remove("hidden");
+  const usable = entries.filter(entry => entry.upload_id && !entry.error).length;
+  const firstUsableIndex = entries.findIndex(entry => entry.upload_id && !entry.error);
+  entrySummary.textContent = `压缩包内发现 ${entries.length} 个 demo，其中 ${usable} 个可分析，请选择场次`;
+  entryList.innerHTML = entries.map((entry, idx) => `
+    <label class="entry-item ${entry.error ? "invalid" : ""}" title="${entry.error ? escapeHTML(entry.error) : ""}">
+      <input type="checkbox" class="entry-check" data-index="${idx}" ${idx === firstUsableIndex ? "checked" : ""} ${entry.error || !entry.upload_id ? "disabled" : ""} />
+      <span class="entry-name">${escapeHTML(entry.filename || ("demo " + (idx + 1)))}</span>
+      <span class="entry-meta">${entry.error ? "不可用" : ((entry.players || []).length + " 名玩家")}</span>
+    </label>
+  `).join("");
+  entryList.querySelectorAll(".entry-check").forEach(el => {
+    el.addEventListener("change", refreshPlayerOptions);
+  });
+  refreshPlayerOptions();
+}
+
+function hideEntryPicker() {
+  entryPicker.classList.add("hidden");
+  entryList.innerHTML = "";
+}
+
+function selectEntries(mode) {
+  const firstUsable = Array.from(entryList.querySelectorAll(".entry-check")).findIndex(el => !el.disabled);
+  entryList.querySelectorAll(".entry-check").forEach((el, idx) => {
+    if (el.disabled) return;
+    el.checked = mode === "all" || idx === firstUsable;
+  });
+  refreshPlayerOptions();
+}
+
+function getSelectedEntries() {
+  const entries = inspectedUpload && Array.isArray(inspectedUpload.entries) ? inspectedUpload.entries : [];
+  if (entries.length <= 1) return [];
+  const selected = [];
+  entryList.querySelectorAll(".entry-check").forEach(el => {
+    if (!el.checked) return;
+    const idx = parseInt(el.getAttribute("data-index"), 10);
+    if (entries[idx] && entries[idx].upload_id && !entries[idx].error) selected.push(entries[idx]);
+  });
+  return selected;
+}
+
+function currentSelectablePlayers() {
+  if (!inspectedUpload) return [];
+  const entries = Array.isArray(inspectedUpload.entries) ? inspectedUpload.entries : [];
+  const source = entries.length > 1 ? getSelectedEntries() : entries;
+  const seen = new Set();
+  const out = [];
+  for (const entry of source) {
+    for (const name of entry.players || []) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
+  }
+  if (out.length > 0) return out;
+  return inspectedUpload.players || [];
+}
+
+function refreshPlayerOptions() {
+  if (!inspectedUpload) return;
+  const previous = playerSelect.value || playerInput.value;
+  const players = currentSelectablePlayers();
+  playerSelect.innerHTML = players.length
+    ? `<option value="">请选择要分析的玩家</option>` + players.map(name => `<option value="${escapeHTML(name)}">${escapeHTML(name)}</option>`).join("")
+    : `<option value="">未识别到玩家，可手动输入</option>`;
+  playerSelect.disabled = players.length === 0;
+  const matched = players.find(name => previous && name.toLowerCase() === previous.toLowerCase());
+  if (matched) {
+    playerSelect.value = matched;
+    playerInput.value = matched;
+  } else if (players.length > 0) {
+    playerInput.value = "";
+  }
+}
+
 function startPolling(id) {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
     const r = await fetch(`/demos/${id}`).then(x => x.json());
     let msg = `[${id.slice(0,8)}] 状态 = ${r.status}`;
-    if (r.error) msg += "  错误: " + r.error.slice(0, 200);
+    if (r.error) msg += (r.status === "done" ? "  警告: " : "  错误: ") + r.error.slice(0, 200);
     statusLine.innerHTML = escapeHTML(msg);
     setStage(r.status);
 
@@ -538,6 +732,53 @@ function startPolling(id) {
   }, 2000);
 }
 
+function startPollingMany(ids) {
+  if (pollTimer) clearInterval(pollTimer);
+  for (const t of pollTimers.values()) clearInterval(t);
+  pollTimers.clear();
+  const states = new Map(ids.map(id => [id, { status: "queued", error: "" }]));
+  let firstLoaded = false;
+
+  const renderBatchStatus = () => {
+    const values = [...states.values()];
+    const done = values.filter(x => x.status === "done").length;
+    const failed = values.filter(x => x.status === "failed").length;
+    const active = values.length - done - failed;
+    statusLine.textContent = `批量分析：完成 ${done}/${values.length}，进行中 ${active}，失败 ${failed}`;
+    if (failed > 0) setStage("failed");
+    else if (done === values.length) setStage("done");
+    else if (values.some(x => x.status === "analyzing")) setStage("analyzing");
+    else if (values.some(x => x.status === "parsing")) setStage("parsing");
+    else setStage("queued");
+  };
+
+  ids.forEach(id => {
+    const timer = setInterval(async () => {
+      const r = await fetch(`/demos/${id}`).then(x => x.json());
+      states.set(id, { status: r.status, error: r.error || "" });
+      renderBatchStatus();
+      refreshList();
+      if (r.status === "done") {
+        clearInterval(timer);
+        pollTimers.delete(id);
+        if (!firstLoaded) {
+          firstLoaded = true;
+          loadReport(id);
+        }
+      } else if (r.status === "failed") {
+        clearInterval(timer);
+        pollTimers.delete(id);
+      }
+      if (pollTimers.size === 0) {
+        stopElapsed();
+        submitBtn.disabled = false;
+      }
+    }, 2000);
+    pollTimers.set(id, timer);
+  });
+  renderBatchStatus();
+}
+
 async function loadReport(id) {
   progressWrap.classList.add("hidden");
   const [report, stats] = await Promise.all([
@@ -558,6 +799,15 @@ function renderReport(r, st) {
     <div class="item"><div class="k">目标玩家</div><div class="v">${escapeHTML(t.name || "-")}</div></div>
     <div class="item"><div class="k">K / D / A</div><div class="v">${t.kills}/${t.deaths}/${t.assists}</div></div>
   `;
+  const analysisWarning = $("analysis-warning");
+  if (r.analysis_warning || r.analysis_source === "offline_fallback") {
+    const reason = r.analysis_warning ? `原因：${r.analysis_warning}` : "原因：LLM 未返回可用结果";
+    analysisWarning.textContent = `本次使用离线规则报告。${reason}`;
+    analysisWarning.classList.remove("hidden");
+  } else {
+    analysisWarning.textContent = "";
+    analysisWarning.classList.add("hidden");
+  }
   $("verdict").textContent = r.verdict || "";
   $("score").textContent = r.overall_score ?? "--";
 
@@ -766,14 +1016,14 @@ async function refreshList() {
     const list = data.demos || [];
     $("demo-list").innerHTML = list.length === 0
       ? `<li><span class="name">还没有 demo，先上传一个</span><span class="st"></span></li>`
-      : list.map(d => `<li data-id="${d.id}">
+      : list.map(d => `<li data-id="${d.id}" data-status="${escapeHTML(d.status)}" title="${escapeHTML(d.error || "")}">
           <span class="name">${escapeHTML(d.filename)} · ${escapeHTML(d.target_user)}</span>
-          <span class="st">${escapeHTML(d.status)}</span>
+          <span class="st">${escapeHTML(d.status)}${d.error && d.status === "done" ? " ⚠" : ""}</span>
         </li>`).join("");
     document.querySelectorAll("#demo-list li[data-id]").forEach(li => {
       li.addEventListener("click", () => {
         const id = li.getAttribute("data-id");
-        const status = li.querySelector(".st").textContent;
+        const status = li.getAttribute("data-status");
         if (status === "done") loadReport(id);
         else if (status !== "failed") {
           showProgress();

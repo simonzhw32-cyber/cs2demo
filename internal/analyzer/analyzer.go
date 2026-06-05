@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cs2demo/platform/internal/callouts"
 	"github.com/cs2demo/platform/internal/domain"
 	"github.com/cs2demo/platform/internal/prokb"
 )
@@ -41,8 +42,9 @@ func (a *Analyzer) Analyze(ctx context.Context, demoID string, stats domain.Matc
 
 	if a.llm == nil {
 		report := offlineReport(demoID, stats, baseline, comparison)
+		report.AnalysisSource = "offline"
 		fillSummaryEvals(&report, stats)
-		normalizeTerms(&report)
+		normalizeTerms(&report, stats.Map)
 		return report, nil
 	}
 
@@ -51,8 +53,10 @@ func (a *Analyzer) Analyze(ctx context.Context, demoID string, stats domain.Matc
 	if err != nil {
 		report := offlineReport(demoID, stats, baseline, comparison)
 		report.Verdict = "[LLM 调用失败，回退离线规则] " + report.Verdict
+		report.AnalysisSource = "offline_fallback"
+		report.AnalysisWarning = "llm call: " + safeAnalysisWarning(err)
 		fillSummaryEvals(&report, stats)
-		normalizeTerms(&report)
+		normalizeTerms(&report, stats.Map)
 		return report, fmt.Errorf("llm call: %w", err)
 	}
 
@@ -60,21 +64,31 @@ func (a *Analyzer) Analyze(ctx context.Context, demoID string, stats domain.Matc
 	if err != nil {
 		report := offlineReport(demoID, stats, baseline, comparison)
 		report.Verdict = "[LLM 输出无法解析，回退离线规则] " + report.Verdict
+		report.AnalysisSource = "offline_fallback"
+		report.AnalysisWarning = "parse llm json: " + safeAnalysisWarning(err)
 		fillSummaryEvals(&report, stats)
-		normalizeTerms(&report)
+		normalizeTerms(&report, stats.Map)
 		return report, fmt.Errorf("parse llm json: %w (raw_head=%s ... raw_tail=%s)", err, truncate(raw, 200), tail(raw, 200))
 	}
 
 	report.DemoID = demoID
 	report.GeneratedAt = time.Now().UTC()
+	report.AnalysisSource = "llm"
 	report.Comparison = comparison
 	if report.ProReference == "" {
 		report.ProReference = baseline.Notes
 	}
 	mergeOfflineForMissing(&report, stats, baseline)
 	fillSummaryEvals(&report, stats)
-	normalizeTerms(&report)
+	normalizeTerms(&report, stats.Map)
 	return report, nil
+}
+
+func safeAnalysisWarning(err error) string {
+	if err == nil {
+		return ""
+	}
+	return truncate(strings.ReplaceAll(err.Error(), "\n", " "), 500)
 }
 
 // fillSummaryEvals 用规则补 5 个顶层 eval 字段；若 LLM 已经写了就保留。
@@ -221,30 +235,33 @@ func isWordChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }
 
-func normalizeTerms(r *domain.AnalysisReport) {
-	r.Verdict = cleanTerms(r.Verdict)
-	r.ProReference = cleanTerms(r.ProReference)
+func normalizeTerms(r *domain.AnalysisReport, mapName string) {
+	clean := func(s string) string {
+		return callouts.NormalizeText(mapName, cleanTerms(s))
+	}
+	r.Verdict = clean(r.Verdict)
+	r.ProReference = clean(r.ProReference)
 	for i := range r.Strengths {
-		r.Strengths[i].Title = cleanTerms(r.Strengths[i].Title)
-		r.Strengths[i].Detail = cleanTerms(r.Strengths[i].Detail)
+		r.Strengths[i].Title = clean(r.Strengths[i].Title)
+		r.Strengths[i].Detail = clean(r.Strengths[i].Detail)
 	}
 	for i := range r.Weaknesses {
-		r.Weaknesses[i].Title = cleanTerms(r.Weaknesses[i].Title)
-		r.Weaknesses[i].Detail = cleanTerms(r.Weaknesses[i].Detail)
+		r.Weaknesses[i].Title = clean(r.Weaknesses[i].Title)
+		r.Weaknesses[i].Detail = clean(r.Weaknesses[i].Detail)
 	}
 	for i := range r.Suggestions {
-		r.Suggestions[i].Title = cleanTerms(r.Suggestions[i].Title)
-		r.Suggestions[i].Detail = cleanTerms(r.Suggestions[i].Detail)
+		r.Suggestions[i].Title = clean(r.Suggestions[i].Title)
+		r.Suggestions[i].Detail = clean(r.Suggestions[i].Detail)
 	}
 	for i := range r.RoundAnalyses {
-		r.RoundAnalyses[i].Tactic = cleanTerms(r.RoundAnalyses[i].Tactic)
-		r.RoundAnalyses[i].Mistake = cleanTerms(r.RoundAnalyses[i].Mistake)
-		r.RoundAnalyses[i].Clutch = cleanTerms(r.RoundAnalyses[i].Clutch)
-		r.RoundAnalyses[i].GrenadeEval = cleanTerms(r.RoundAnalyses[i].GrenadeEval)
-		r.RoundAnalyses[i].MapControl = cleanTerms(r.RoundAnalyses[i].MapControl)
-		r.RoundAnalyses[i].UtilityAssist = cleanTerms(r.RoundAnalyses[i].UtilityAssist)
-		r.RoundAnalyses[i].OpponentPredict = cleanTerms(r.RoundAnalyses[i].OpponentPredict)
-		r.RoundAnalyses[i].Adjustment = cleanTerms(r.RoundAnalyses[i].Adjustment)
+		r.RoundAnalyses[i].Tactic = clean(r.RoundAnalyses[i].Tactic)
+		r.RoundAnalyses[i].Mistake = clean(r.RoundAnalyses[i].Mistake)
+		r.RoundAnalyses[i].Clutch = clean(r.RoundAnalyses[i].Clutch)
+		r.RoundAnalyses[i].GrenadeEval = clean(r.RoundAnalyses[i].GrenadeEval)
+		r.RoundAnalyses[i].MapControl = clean(r.RoundAnalyses[i].MapControl)
+		r.RoundAnalyses[i].UtilityAssist = clean(r.RoundAnalyses[i].UtilityAssist)
+		r.RoundAnalyses[i].OpponentPredict = clean(r.RoundAnalyses[i].OpponentPredict)
+		r.RoundAnalyses[i].Adjustment = clean(r.RoundAnalyses[i].Adjustment)
 	}
 }
 
@@ -294,6 +311,7 @@ func buildPrompt(stats domain.MatchStats, baseline domain.ProBaseline, cmp []dom
 	var b strings.Builder
 	t := stats.Target
 	fmt.Fprintf(&b, "## 比赛信息\n地图: %s（请只针对这张地图给建议，不要跨提其它地图）\n", stats.Map)
+	fmt.Fprintf(&b, "点位规范: %s\n", callouts.PromptReference(stats.Map))
 	fmt.Fprintf(&b, "比分: T %d - %d CT, 总回合: %d, 时长: %ds\n\n",
 		stats.ScoreT, stats.ScoreCT, stats.RoundsTotal, stats.DurationSec)
 
@@ -674,8 +692,8 @@ func offlineReport(demoID string, stats domain.MatchStats, baseline domain.ProBa
 		score = 95
 	}
 	r.OverallScore = score
-	r.Verdict = fmt.Sprintf("本场 K/D=%.2f, ADR=%.1f, KAST=%.1f%%，相对职业 %s 基线整体 %s",
-		kd, t.ADR, t.KAST, baseline.Role, overallVerdict(cmp))
+	r.Verdict = fmt.Sprintf("本场 K/D=%.2f，ADR=%.1f，KAST=%.1f%%。对比职业%s基线：%s。",
+		kd, t.ADR, t.KAST, roleDisplayName(baseline.Role), overallVerdict(cmp))
 
 	if t.HeadshotPct >= baseline.HeadshotPct {
 		r.Strengths = append(r.Strengths, domain.ReportPoint{
@@ -722,12 +740,32 @@ func offlineReport(demoID string, stats domain.MatchStats, baseline domain.ProBa
 	}
 
 	r.Suggestions = []domain.ReportPoint{
-		{Title: "针对 " + baseline.Role + " 角色训练", Detail: baseline.Notes},
+		{Title: "针对" + roleDisplayName(baseline.Role) + "角色训练", Detail: baseline.Notes},
 		{Title: "复盘 " + stats.Map + " 地图位置", Detail: "对照职业选手在 " + stats.Map + " 上的站位与投掷物使用，禁止跨地图借鉴"},
 	}
 
 	r.RoundAnalyses = ruleBasedRoundAnalyses(stats)
 	return r
+}
+
+func roleDisplayName(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "rifler":
+		return "步枪手"
+	case "awper":
+		return "AWP手"
+	case "entry":
+		return "突破手"
+	case "support":
+		return "辅助位"
+	case "igl":
+		return "指挥位"
+	default:
+		if role == "" {
+			return "选手"
+		}
+		return role
+	}
 }
 
 func ruleBasedRoundAnalyses(stats domain.MatchStats) []domain.RoundAnalysisOut {

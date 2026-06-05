@@ -88,8 +88,10 @@ func (o *Orchestrator) run(j Job) {
 	}
 
 	report, err := o.analyzer.Analyze(ctx, j.DemoID, stats)
+	analysisWarning := ""
 	if err != nil {
 		log.Printf("[job %s] analyze warning: %v (will save fallback report)", j.DemoID, err)
+		analysisWarning = "analyze: " + err.Error()
 	}
 	if err := o.store.SaveReport(ctx, j.DemoID, report); err != nil {
 		log.Printf("[job %s] save report failed: %v", j.DemoID, err)
@@ -97,6 +99,6 @@ func (o *Orchestrator) run(j Job) {
 		return
 	}
 
-	_ = o.store.UpdateStatus(ctx, j.DemoID, domain.StatusDone, "")
+	_ = o.store.UpdateStatus(ctx, j.DemoID, domain.StatusDone, analysisWarning)
 	log.Printf("[job %s] done", j.DemoID)
 }
